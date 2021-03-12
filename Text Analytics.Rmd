@@ -1,0 +1,357 @@
+---
+title: "Text Analytics"
+author: "Rosie Bai"
+date: "3/11/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(qdap)
+library(tm)
+library(NLP)
+library(ggthemes)
+library(RWeka)
+library(wordcloud)
+library(stringr)
+library(tidyr)
+library(tidytext)
+library(topicmodels)
+library(stm)
+
+setwd('G:/HRIS/Bai/OHI project')
+data<- read_excel("G:/HRIS/Bai/OHI project/Zurich OHI_comments file_Zurich North America incl USCI.xlsx", sheet = "comments")
+
+```
+# EDA
+```{r}
+names(data)
+dim(data)
+colSums(is.na(data))
+
+```
+
+# Text Cleaning
+```{r}
+data$numword<-sapply(gregexpr("[[:alpha:]]+", data$comments), function(x) sum(x > 0))
+# removing the comments having less than 7 words
+data2<-data[data$numword >7,]
+
+na_percentage<- 1-(nrow(data2)/nrow(data))
+na_percentage
+
+data2<-data2[,-3]
+names(data2)
+```
+
+```{r}
+text<-as.matrix(data2[,2])
+text_source<-VectorSource(text)
+text_corpus <- VCorpus(text_source)
+
+# clean corpus
+custom_stopwords<-c("can", "make","zurich","company","the","much","many","also", "will","take","employee")
+clean_corpus <- function(corpus) {
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords,
+                   words = c(stopwords("en"),custom_stopwords))
+  corpus <- tm_map(corpus, stemDocument)
+  corpus <- tm_map(corpus, stripWhitespace)
+  return(corpus)
+}
+
+# Apply your customized function to the corpus
+clean_corp <- clean_corpus(text_corpus)
+```
+# Term Frequency
+```{r}
+text_dtm <- DocumentTermMatrix(clean_corp)
+#inspect(text_dtm[500:505, 500:505])
+text_dtm <- removeSparseTerms(text_dtm, 0.99)
+text_dtm
+inspect(text_dtm[1,1:20])
+findFreqTerms(text_dtm, 100)
+freq <- data.frame(sort(colSums(as.matrix(text_dtm)), decreasing=TRUE))
+```
+
+
+
+```{r}
+# making tidy dataset
+data(stop_words)
+custom_stopwords<-c("can", "make","zurich","company","the","much","many","also", "will","take","employees", "employee", "feel")
+stop_words<- bind_rows(tibble(word = custom_stopwords,  
+                                      lexicon = c("custom")), 
+                               stop_words)
+tidy_data<- data2 %>%
+  unnest_tokens(word, comments)%>%
+  anti_join(stop_words)%>%
+  count(word, sort = TRUE)
+
+tidy_data
+
+
+  
+tidy_data %>%
+  filter(n>150) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col() +
+  labs(x = "top terms", y = "term freq") + coord_flip() 
+  
+```
+
+
+# TF-IDF
+```{r}
+text_words <- data2 %>%
+  unnest_tokens(word,comments) %>%
+  count(department, word, sort = TRUE) 
+
+text_words 
+
+total_words <- text_words %>% 
+  group_by(department) %>%
+  summarise(total = sum(n))
+
+text_words <-left_join(text_words, total_words) 
+text_words
+
+
+ggplot(text_words, aes(n/total, fill = department)) +
+  geom_histogram(show.legend = FALSE) +
+  xlim(NA, 0.0009) +
+  facet_wrap(~department, ncol = 3, scales = "free_y")
+```
+
+Zipf’s law states that the frequency that a word appears is inversely proportional to its rank.
+
+```{r}
+freq_by_rank <- text_words %>% 
+  group_by(department) %>% 
+  mutate(rank = row_number(), 
+         `term frequency` = n/total) %>%
+  ungroup()
+
+freq_by_rank
+
+freq_by_rank %>% 
+  ggplot(aes(rank, `term frequency`, color = department)) + 
+  geom_line(size = 1.1, alpha = 0.8, show.legend = FALSE) + 
+  scale_x_log10() +
+  scale_y_log10()
+
+# Let’s see what the exponent of the power law is for the middle section of the rank range.
+rank_subset <- freq_by_rank %>% 
+  filter(rank < 500,
+         rank > 5)
+
+lm(log10(`term frequency`) ~ log10(rank), data = rank_subset)
+
+freq_by_rank %>% 
+  ggplot(aes(rank, `term frequency`, color = department)) + 
+  geom_abline(intercept = -0.8458, slope =  -0.9724, 
+              color = "gray50", linetype = 2) +
+  geom_line(size = 1.1, alpha = 0.8, show.legend = FALSE) +
+  scale_x_log10() +
+  scale_y_log10()
+  
+
+```
+Calculating tf-idf attempts to find the words that are important (i.e., common) in a text, but not too common.
+```{r}
+department_tf_idf <- text_words %>%
+  bind_tf_idf(word, department, n) %>%
+  select(-total) %>%
+  arrange(desc(tf_idf)) %>%
+  slice_head(n = 15)%>%
+  mutate(word = reorder(word, tf_idf))%>%
+  ggplot(aes(word, tf_idf))+geom_col()+coord_flip()+labs(x = "word", y = "tf-idf")
+ 
+department_tf_idf
+
+```
+
+# Tri-grams plot
+```{r}
+# Make tokenizer function 
+tokenizer <- function(x) {
+  NGramTokenizer(x, Weka_control(min = 3, max = 3))
+}
+
+# Create text_c_tdm
+text_c_tdm <- TermDocumentMatrix(
+  clean_corp,
+  control = list(tokenize = tokenizer)
+)
+
+# Create text_c_tdm_m
+text_c_tdm_m <- as.matrix(text_c_tdm)
+
+# Create text_c_freq
+text_c_freq <- rowSums(text_c_tdm_m)
+# Plot a wordcloud of bigrams
+set.seed(1234)
+wordcloud(names(text_c_freq), text_c_freq, min.freq = 1,
+          max.words=20, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"), main = "ZNA")
+
+trigram_freq<-sort(text_c_freq,decreasing = TRUE)
+trigram_freq[1:70]
+
+tri_words<-names(text_c_freq)
+# Examine part of bi_words
+str_subset(tri_words, "^concern")
+str_subset(tri_words, "^manag")
+
+```
+# Sentiment Analysis
+```{r}
+get_sentiments("bing")
+
+tidy_data <- data2 %>%
+  group_by(department) %>%
+  mutate(linenumber = row_number())%>%
+  ungroup() %>%
+  unnest_tokens(word, comments)
+
+text_sentiment <- tidy_data %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(department, index = linenumber %/% 80, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative)
+
+ggplot(text_sentiment, aes(index, sentiment, fill = department)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~department, ncol = 3, scales = "free_x")
+
+bing_word_counts <- tidy_data %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word,n)) %>%
+  ggplot(aes(word,n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip()+
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(y = "Contribution to sentiment")
+
+```
+# Topics Modeling
+```{r}
+
+text<-as.matrix(data2[,2])
+text_source<-VectorSource(text)
+text_corpus <- VCorpus(text_source)
+
+# clean corpus
+custom_stopwords<-c("can", "make","zurich","company","the","much","many","also", "will","take","employee")
+clean_corpus <- function(corpus) {
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords,
+                   words = c(stopwords("en"),custom_stopwords))
+  corpus <- tm_map(corpus, stemDocument)
+  corpus <- tm_map(corpus, stripWhitespace)
+  return(corpus)
+}
+
+# Apply your customized function to the corpus
+clean_corp <- clean_corpus(text_corpus)  
+text_dtm <- DocumentTermMatrix(clean_corp)
+inspect(text_dtm[500:505, 500:505])
+text_dtm <- removeSparseTerms(text_dtm, 0.99)
+text_dtm
+inspect(text_dtm[1,1:20])
+findFreqTerms(text_dtm, 100)
+
+freq <- data.frame(sort(colSums(as.matrix(text_dtm)), decreasing=TRUE))
+#wordcloud(rownames(freq), freq[,1], max.words=50, colors=brewer.pal(1, "Dark2"))
+
+raw.sum<-apply(text_dtm,1,FUN=sum)
+text_dtm<-text_dtm[raw.sum!=0,]
+
+
+#sum by raw each raw of the table
+text_lda<- LDA(text_dtm, k = 6,control = list(seed = 1234))
+# The tidytext package provides this method for extracting the per-topic-per-word probabilities, called ??
+# ("beta"), from the model. 
+# this has turned the model into a one-topic-per-term-per-row format.
+# the model computes the probability of that term being generated from that topic.
+
+
+  
+```
+
+```{r}
+text_topics <-tidy(text_lda, matrix = "beta")
+
+
+text_top_terms <- text_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+  
+text_top_terms
+
+text_top_terms %>%
+  mutate(term = reorder_within(term, beta,topic)) %>%
+  ggplot(aes(term,beta,fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free")+
+  coord_flip()+
+  scale_x_reordered() 
+
+
+```
+
+```{r}
+#consider the terms that had the greatest difference between topic 1 and topic 2. 
+
+library(tidyr)
+
+beta_spread <- text_topics %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  spread(topic, beta) %>%
+  filter(topic1 > .001 | topic2 > .001) %>%
+  mutate(log_ratio = log2(topic2 / topic1))
+
+beta_spread %>%
+  group_by(direction = log_ratio > 0) %>%
+  top_n(10, abs(log_ratio)) %>%
+  ungroup() %>%
+  mutate(term = reorder(term,log_ratio)) %>%
+  ggplot(aes(term, log_ratio)) +
+  geom_col() +
+  labs(y = "Log2 ratio of beta in topic 2 / topic 1",
+       title = "The words with the greatest differences between the two topics are visualized" ) +
+  coord_flip()
+  
+
+beta_spread <- text_topics %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  spread(topic, beta) %>%
+  filter(topic1 > .001 | topic3 > .001) %>%
+  mutate(log_ratio = log2(topic3 / topic1))
+
+beta_spread %>%
+  group_by(direction = log_ratio > 0) %>%
+  top_n(10, abs(log_ratio)) %>%
+  ungroup() %>%
+  mutate(term = reorder(term,log_ratio)) %>%
+  ggplot(aes(term, log_ratio)) +
+  geom_col() +
+  labs(y = "Log2 ratio of beta in topic 3 / topic 1",
+       title = "The words with the greatest differences between the two topics are visualized" ) +
+  coord_flip()
+```
+
