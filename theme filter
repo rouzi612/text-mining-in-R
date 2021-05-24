@@ -1,0 +1,65 @@
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(qdap)
+library(tm)
+library(NLP)
+library(ggthemes)
+library(RWeka)
+library(wordcloud)
+library(stringr)
+library(tidyr)
+library(tidytext)
+#set workinf directory
+setwd('G:/HRIS/Bai/Manager Effectiveness Survey')
+#read in the data. 
+
+data <- read.csv("pilot data with sentiment.csv",
+                 stringsAsFactors = F, fileEncoding="UTF-8-BOM")
+
+#data <- read.csv("testset.csv",stringsAsFactors = F, fileEncoding="UTF-8-BOM")                 
+
+#read in word tags
+themes<-read.csv('search words.csv',stringsAsFactors = F, fileEncoding="UTF-8-BOM" )
+names(themes)
+unique(themes$Theme)
+names(data)
+#create a place to store mentions of the themes
+mention<-c()
+################ WARNING: check the column index of your text column before running the for loop below ######################
+#loop through unique theme names
+for(j in 1:length(unique(themes$Theme))){
+  #pull all words associated with the theme
+  words<-themes[themes[,1]==unique(themes$Theme)[j],2]
+  #store them name
+  #namer<-c(namer,unique(themes$Theme)[j])
+  
+  #a place to store which comments mention each word in the theme
+  storer<-c()
+  #inner loop through all words in the theme
+  for(i in 1:length(words)){
+    #store which comments contain the word, ignoring case,
+   ######WARNING:###### change column index based on the index of your text column
+    storer<-cbind(storer,grepl(words[i],data[,27],ignore.case=T))
+  }
+  #determine if each comment contained any of the words
+  mention<-cbind(mention,apply(storer,1,max))
+  #keep track of where we are in the process.
+  print(j/(length(unique(themes$Theme)))*100)
+}
+
+#give theme names to theme tag matrix
+colnames(mention)<-unique(themes$Theme)
+
+#output data
+new_data<-cbind(data,mention)
+write.csv(new_data,'pilot data with themes.csv',row.names = F)
+
+#write.csv(new_data,'last column with themes.csv',row.names = F)
+
+
+# view the data output
+
+names(new_data)
+keywords<-new_data[,c(7:10)]
+colSums(keywords)
