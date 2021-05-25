@@ -1,1 +1,116 @@
 
+
+##  Sentiment Analysis ##
+
+# Load the required R libraries
+
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(qdap)
+library(tm)
+library(NLP)
+library(wordcloud)
+library(stringr)
+library(tidyr)
+library(tidytext)
+library(topicmodels)
+library(forcats)
+library(caret)
+library(openNLP)
+
+# Load the data
+data <- read_excel("G:/HRIS/Exit Interview/2021/Zurich_Insurance_Group_raw_responses_01-01-2020_thru_02-08-2021.xlsx")
+names(data)
+
+str(data$`Comments: Workload`)
+class(data$Tenure)
+dim(data)
+
+
+# Response rate of the text columns
+#length(which(!is.na(data[,"text"])))
+apply(data[,c(57:81)],2, function(x) length(which(!is.na(x))))/nrow(data)
+
+apply(data[,c(57:81)],2, function(x) length(which(!is.na(x))))
+
+
+
+## Text Pre-processing
+
+# Load the sentiment dictionary
+
+dict<-get_sentiments("bing")
+
+dict
+
+dict %>% 
+  count(sentiment)
+
+# filter on all negative sentiment
+dict %>% filter(sentiment == "negative")
+
+
+# check if certain word in the dictionary or not and its sentiment label
+dict$sentiment[dict$word=="loss"]
+dict$sentiment[dict$word=="burnout"]
+dict$sentiment[dict$word=="pending"]
+dict$sentiment[dict$word=="unfair"]
+dict$sentiment[dict$word=="unaware"]
+dict$sentiment[dict$word=="stressed"]
+
+
+# doing a tf analysis helps to identify new sentiment words
+tidy_data<- data %>%
+  unnest_tokens(word, `Comments: Workload`)%>%
+  anti_join(custom_stopwords)%>%
+  count(word, sort = TRUE)
+
+
+head(tidy_data, n = 20)
+# i.e.:
+neg<-c("burnout","unfair","unaware","not", 
+       "no","doesn't","don't", "cannot", 
+       "too", "didn't", "stressed")
+
+additional_sentiment <- tibble(word=neg,
+                               sentiment=c("negative"))
+
+new_dict<- get_sentiments("bing")%>%
+  rbind(additional_sentiment)
+
+tail(new_dict)
+
+# Here is one of the text columns from the survey data - "text":
+
+tidy_data <- data %>%
+  group_by(PCODE)%>%
+  mutate(linenumber = row_number())%>%
+  ungroup() %>%
+  unnest_tokens(word, `Comments: Workload`)
+
+
+
+text_sentiment <- tidy_data %>%
+  inner_join(new_dict) %>%
+  anti_join(custom_stopwords)%>%
+  count(PCODE, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment_score1 = positive - negative, sentiment_label1 = ifelse(sentiment_score1 > 0, "Positive",
+                                                                           ifelse(sentiment_score1 == 0, "Neutral",
+                                                                                  ifelse(sentiment_score1 < 0, "Negative", NA))))
+head(text_sentiment)
+
+data$sentiment_score1<- text_sentiment$sentiment_score1[match(data$PCODE, text_sentiment$PCODE)]
+
+data$sentiment_label1<- text_sentiment$sentiment_label1[match(data$PCODE, text_sentiment$PCODE)]
+
+table(data$sentiment_label1)
+
+sub_data<-data[,c(1,58,83,84)]
+
+sub_data<-sub_data[!is.na(data$`Comments: Workload`),]
+
+View(sub_data)
+write.csv(sub_data, file = "data1.csv")
+
