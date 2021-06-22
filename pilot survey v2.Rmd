@@ -1,0 +1,909 @@
+---
+title: "MEFF Survey Analysis v2"
+author: "Rosie Bai"
+date: "5/13/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+#options(java.parameters = "-Xmx1024m")
+
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(qdap)
+library(tm)
+library(NLP)
+library(wordcloud)
+library(stringr)
+library(tidyr)
+library(tidytext)
+library(topicmodels)
+library(forcats)
+library(caret)
+library(openNLP)
+
+data <- read_excel("G:/HRIS/Bai/Manager Effectiveness Survey/Pilot_BU.xlsx")
+```
+
+
+
+```{r include=FALSE}
+# shorten text column names 
+names(data)
+names(data)[7] <- "excels"
+names(data)[8] <- "change"
+names(data)[11] <- "feedback"
+names(data)[13] <- "detractor"
+names(data)[14] <- "passive"
+names(data)[15] <- "promotor"
+```
+
+
+# Response rate of the text columns
+```{r echo=FALSE}
+#length(which(!is.na(data[,"excels"])))
+apply(data[,c(7,8,11,13:15)],2, function(x) length(which(!is.na(x))))
+
+apply(data[,c(7,8,11,13:15)],2, function(x) length(which(!is.na(x))))/390
+
+```
+
+
+Creating a new BU column to cut the data
+```{r echo=FALSE}
+
+data$new_BU<-ifelse(data$`Business Segment` == "Group Operations", "Ops & Technology",
+                         ifelse(data$`Business Segment` == "ZNA Hosted", "Risk Engineering",
+                                ifelse(data$`Major Unit` == "Claims", "Claims",
+                                       ifelse(data$`Major Unit` == "Finance & Actuarial", "Finance & Actuarial",
+                                              ifelse(data$`Major Unit` == "Human Resources", "Human Resources", data$`Business Segment`)))))                            
+
+
+data$flag<-ifelse(data$`During the recent goal setting process, my manager collaborated with me to define goals aligned with our strategic priorities and financial plan.` == "Strongly Agree"&
+                       data$`My manager holds me accountable for the delivery of agreed outcomes.`== "Strongly Agree"&
+                       data$`My manager provides me the autonomy I need to do my job.` == "Strongly Agree"&
+                       data$`My manager provides timely, constructive feedback.` == "Strongly Agree"&
+                       data$`My manager regularly recognizes me in a way that makes me feel valued.`=="Strongly Agree"&
+                       data$`I believe my manager and I have a trusting relationship.` == "Strongly Agree"&
+                       data$`I believe my manger consistently follows through on commitments.`=="Strongly Agree", "Strongly Agree",
+                  ifelse(data$`During the recent goal setting process, my manager collaborated with me to define goals aligned with our strategic priorities and financial plan.` == "Agree"&
+                       data$`My manager holds me accountable for the delivery of agreed outcomes.`== "Agree"&
+                       data$`My manager provides me the autonomy I need to do my job.` == "Agree"&
+                       data$`My manager provides timely, constructive feedback.` == "Agree"&
+                       data$`My manager regularly recognizes me in a way that makes me feel valued.`=="Agree"&
+                       data$`I believe my manager and I have a trusting relationship.` == "Agree"&
+                       data$`I believe my manger consistently follows through on commitments.`=="Agree","Agree", NA))
+
+table(data$flag)
+
+```
+
+Text preprocessing 
+```{r echo= FALSE}
+
+# Extract entities from an AnnotatedPlainTextDocument
+entities <- function(doc, kind) {
+  s <- doc$content
+  a <- annotation(doc)
+  if(hasArg(kind)) {
+    k <- sapply(a$features, `[[`, "kind")
+    s[a[k == kind]]
+    } else {
+      s[a[a$type == "entity"]]
+         }
+}
+
+
+person_ann <- Maxent_Entity_Annotator(kind = "person")
+# create annotators for words and sentences. Annotators are created by functions which load the underlying Java libraries. These functions then mark the places in the string where words and sentences start and end. The annotation functions are themselves created by functions.
+word_ann <- Maxent_Word_Token_Annotator()
+sent_ann <- Maxent_Sent_Token_Annotator()
+
+pipeline <- list(sent_ann,
+                 word_ann,
+                 person_ann)
+# apply to the colum where contains the unwanted entities, i.e. the "excels" column in data.
+
+text_annotations <- annotate(data$excels, pipeline)
+text_doc <- AnnotatedPlainTextDocument(data$excels, text_annotations)
+
+people_names<- entities(text_doc, kind = "person")
+people_names<- tolower(unique(people_names))
+
+people_names<-unlist(strsplit(people_names," "))
+
+# creating stopwords
+
+custom_stopwords<-c("can", "make","zurich","company","the",
+                    "much","many","also", "will","take",
+                    "employee","employees","get", "work",
+                    "feel", "job", "manager","managers", 
+                    "team", NA, people_names, "charley",
+                    "nate", "teri")
+
+
+custom_stopwords<- bind_rows(tibble(word = custom_stopwords,  
+                                      lexicon = c("custom")),  stop_words)
+
+removeDash<- function(x){
+  x<-gsub("-", " ",x)
+  return(x)
+}
+
+clean_corpus <- function(corpus) {
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords,
+                   words = c(stopwords("en"), "can", "make","zurich","company","the",
+                    "much","many","also", "will","take",
+                    "employee","employees","get", "work",
+                    "feel", "job", "manager","managers", "team", NA))
+  corpus <- tm_map(corpus, stemDocument)
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus <- tm_map(corpus, content_transformer(removeDash))
+  return(corpus)
+}
+
+
+
+
+```
+
+## Qs1. What is one thing your manager excels at in regard to supporting your performance? [col 6]
+# Freqency list
+
+```{r echo= FALSE}
+
+tidy_data<- data %>%
+  unnest_tokens(word, excels)%>%
+  anti_join(custom_stopwords)%>%
+  count(word, sort = TRUE)
+ 
+
+head(tidy_data, n = 20)
+
+```
+
+```{r}
+data$topics_excels<-ifelse(str_detect(data$excels,"feedback") == TRUE, "feedback",
+                           ifelse(str_detect(data$excels,"perform") == TRUE, "performance",
+                                  ifelse(str_detect(data$excels, regex("autonomy", ignore_case = T)) == TRUE, "autonomy",
+                                         ifelse(str_detect(data$excels,"goal|goals") == TRUE, "goal", NA))))
+
+table(data$topics_excels)
+```
+
+
+# Qs1. Bar plot in tf
+```{r echo= FALSE}
+  
+tidy_data %>%
+  filter(n>15) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col() +
+  labs(x = "top terms", y = "term frequency",
+       title = "One thing manager excels at supporting EE performance") + 
+  coord_flip() 
+```
+
+
+# Qs1.tf by BU
+
+```{r echo= FALSE}
+
+BU_words<- data %>%
+  unnest_tokens(word, excels)%>%
+  anti_join(custom_stopwords)%>%
+  count(`new_BU`,word, sort = TRUE) 
+  
+  
+BU_tf<- BU_words %>%
+  group_by(`new_BU`) %>%
+  filter(row_number() <= 5L & `new_BU`!="NA")%>%
+  ggplot(aes(reorder_within(word, n, `new_BU`), n, fill= `new_BU`)) +
+  geom_col( show.legend = FALSE) +
+  labs(x = "top terms", y = "tf",
+       title = "One thing manager excels at supporting EE performance") + 
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~`new_BU`, ncol = 2, scales = "free")
+BU_tf
+
+
+```
+
+
+
+
+#  Qs1. tf by two groups
+
+```{r}
+
+two_groups_words<- data %>%
+  unnest_tokens(word, excels)%>%
+  anti_join(custom_stopwords)%>%
+  count(flag,word, sort = TRUE) 
+  
+  
+two_groups_tf<- two_groups_words %>%
+  group_by(flag) %>%
+  filter(row_number() <= 5L & flag!="NA")%>%
+  ggplot(aes(reorder_within(word, n, flag), n, fill= flag)) +
+  geom_col( show.legend = FALSE) +
+  labs(x = "top terms", y = "tf",
+       title = "One thing manager excels at supporting EE performance") + 
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~flag, ncol = 2, scales = "free")
+two_groups_tf
+```
+
+
+
+#  Qs1. tf-idf by BU
+
+```{r echo= FALSE}
+BU_words<- data %>%
+  unnest_tokens(word, excels)%>%
+  anti_join(custom_stopwords)%>%
+  count(`new_BU`,word, sort = TRUE)
+
+total_words <- BU_words %>%
+  group_by(`new_BU`) %>%
+  summarise(total = sum(n))
+
+BU_words <-left_join(BU_words, total_words)
+
+head(BU_words, n = 20)
+
+BU_tf_idf <-BU_words %>%
+  bind_tf_idf(word, `new_BU`, n)%>%
+  select(-total) %>%
+  arrange(desc(tf_idf)) 
+
+BU_tf_idf %>%
+  group_by(`new_BU`)%>%
+  filter(row_number() <= 5L & `new_BU`!= "NA") %>%
+  mutate(word = reorder(word, tf_idf))%>%
+  #ungroup()%>%
+  ggplot(aes(word, tf_idf, fill = `new_BU`))+
+  geom_col(show.legend = FALSE)+
+  coord_flip()+
+  labs(x = "characteristic word", y = "tf-idf", 
+        title = "One thing manager excels at supporting EE performance") +
+  facet_wrap(~`new_BU`, ncol = 2, scales = "free")
+  
+BU_tf_idf
+
+```
+
+
+
+## Qs2. What is one thing your manager could change to better support your performance? [col 7]
+# Freqency list
+```{r echo= FALSE}
+
+tidy_data<- data %>%
+  unnest_tokens(word, change)%>%
+  anti_join(custom_stopwords)%>%
+  count(word, sort = TRUE)
+head(tidy_data, n = 20)
+
+```
+
+
+
+```{r}
+data$topics_change<-ifelse(str_detect(data$change,regex("timely", ignore_case = T)) == TRUE, "timely",
+                           ifelse(str_detect(data$change,"feedback") == TRUE, "feedback",
+                                  ifelse(str_detect(data$change, regex("perform", ignore_case = T)) == TRUE, "performance",
+                                         ifelse(str_detect(data$change,"goal|goals") == TRUE, "goal", NA))))
+
+table(data$topics_change)
+```
+
+
+# check single word association
+```{r}
+text<-as.matrix(data[,7])
+text_source<-VectorSource(text)
+text_corpus <- VCorpus(text_source)
+clean_corp <- clean_corpus(text_corpus)
+text_tdm <- TermDocumentMatrix(clean_corp)
+associations <- findAssocs(text_tdm, terms ="autonomy" , 0.1)
+associations
+
+```
+
+```{r}
+text<-as.matrix(data[,8])
+text_source<-VectorSource(text)
+text_corpus <- VCorpus(text_source)
+clean_corp <- clean_corpus(text_corpus)
+text_tdm <- TermDocumentMatrix(clean_corp)
+associations <- findAssocs(text_tdm, terms ="time" , 0.3)
+associations
+```
+
+
+
+```{r}
+text<-as.matrix(data[,10])
+text_source<-VectorSource(text)
+text_corpus <- VCorpus(text_source)
+clean_corp <- clean_corpus(text_corpus)
+text_tdm <- TermDocumentMatrix(clean_corp)
+associations <- findAssocs(text_tdm, terms ="feedback" , 0.3)
+associations
+```
+
+
+
+
+# Qs2. Bar plot in tf
+
+```{r echo= FALSE}
+  
+tidy_data %>%
+  filter(n>10) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col() +
+  labs(x = "top terms", y = "term frequency",
+       title = "one thing manager could change to better support your performance") +
+  coord_flip()
+```
+
+# Qs2. tf by BU
+
+```{r echo= FALSE}
+
+BU_words<- data %>%
+  unnest_tokens(word, change)%>%
+  anti_join(custom_stopwords)%>%
+  count(`new_BU`,word, sort = TRUE) 
+  
+  
+BU_tf<- BU_words %>%
+  group_by(`new_BU`) %>%
+  filter(row_number() <= 5L & `new_BU`!="NA")%>%
+  ggplot(aes(reorder_within(word, n, `new_BU`), n, fill= `new_BU`)) +
+  geom_col( show.legend = FALSE) +
+  labs(x = "top terms", y = "tf",
+       title = "one thing manager could change to better support your performance") + 
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~`new_BU`, ncol = 2, scales = "free")
+BU_tf
+```
+
+
+
+
+#  Qs2. tf by two groups
+
+```{r}
+
+two_groups_words<- data %>%
+  unnest_tokens(word, change)%>%
+  anti_join(custom_stopwords)%>%
+  count(flag,word, sort = TRUE) 
+  
+  
+two_groups_tf<- two_groups_words %>%
+  group_by(flag) %>%
+  filter(row_number() <= 5L & flag!= "NA" )%>%
+  ggplot(aes(reorder_within(word, n, flag), n, fill= flag)) +
+  geom_col( show.legend = FALSE) +
+  labs(x = "top terms", y = "tf",
+       title = "one thing manager could change to better support your performance") + 
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~flag, ncol = 2, scales = "free")
+
+two_groups_tf
+
+data$change[which(str_detect(data$change,"continue")==TRUE)]
+
+```
+
+
+**COMMENTS**: Strongly agree group mentioned their managers are doing all the great things at a continuous level, i.e. continue to support, continue to give feedbacks, continue to have conversations about certain things.
+
+
+# Qs2. tf-idf by BU
+```{r echo= FALSE}
+BU_words<- data %>%
+  unnest_tokens(word, change)%>%
+  anti_join(custom_stopwords)%>%
+  count(`new_BU`,word, sort = TRUE)
+
+total_words <- BU_words %>%
+  group_by(`new_BU`) %>%
+  summarise(total = sum(n))
+
+BU_words <-left_join(BU_words, total_words)
+
+head(BU_words, n = 20)
+
+BU_tf_idf <-BU_words %>%
+  bind_tf_idf(word, `new_BU`, n)%>%
+  select(-total) %>%
+  arrange(desc(tf_idf)) 
+
+BU_tf_idf %>%
+  group_by(`new_BU`)%>%
+  filter(row_number() <= 5L & `new_BU`!= "NA") %>%
+  mutate(word = reorder(word, tf_idf))%>%
+  #ungroup()%>%
+  ggplot(aes(word, tf_idf, fill = `new_BU`))+
+  geom_col(show.legend = FALSE)+
+  coord_flip()+
+  labs(x = "characteristic word", y = "tf-idf",
+        title = "one thing manager could change to better support your performance") +
+  facet_wrap(~`new_BU`, ncol = 2, scales = "free")
+  
+BU_tf_idf
+```
+
+
+## Qs3. Is there additional feedback you want to share with your manager? [col 10]
+
+# Frequency list
+
+```{r echo= FALSE}
+tidy_data<- data %>%
+  unnest_tokens(word, feedback)%>%
+  anti_join(custom_stopwords)%>%
+  count(word, sort = TRUE)
+
+head(tidy_data, n = 30)
+
+```
+# Qs3. Bar plot in tf
+```{r echo= FALSE}
+
+tidy_data %>%
+  filter(n>6) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col() +
+  labs(x = "top terms", y = "term frequency",
+       title = "Is there additional feedback you want to share with your manager?") +
+  coord_flip()
+```
+
+**COMMENT** : Building a trusting relationship between EE and Mgr. 
+
+```{r}
+data$topics_feedback<-ifelse(str_detect(data$feedback,"trust") == TRUE, "Trusting relationship", NA)
+
+table(data$topics_feedback)
+```
+
+
+#  Qs3. tf by two groups
+
+```{r}
+
+two_groups_words<- data %>%
+  unnest_tokens(word, feedback)%>%
+  anti_join(custom_stopwords)%>%
+  count(flag,word, sort = TRUE) 
+  
+  
+two_groups_tf<- two_groups_words %>%
+  group_by(flag) %>%
+  filter(row_number() <= 5L & flag!= "NA" )%>%
+  ggplot(aes(reorder_within(word, n, flag), n, fill= flag)) +
+  geom_col( show.legend = FALSE) +
+  labs(x = "top terms", y = "tf",
+       title = "Is there additional feedback you want to share with your manager?") + 
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~flag, ncol = 2, scales = "free")
+
+two_groups_tf
+data$feedback[which(str_detect(data$feedback,"empower")==TRUE)]
+
+```
+**COMMENTS**: Strongly agree group commonly mentioned "trusting relationship"; Agree group commonly mentioned " flexibility and autonomy on jobs, (is not empower enough).
+
+## Qs4. NPS Comments by BU
+
+```{r echo= FALSE}
+
+data$mNPS_text <- paste(data$detractor,data$passive,data$promotor, sep = "")
+data$mNPS_text<-gsub("NA|NANA|NANANA","", data$mNPS_text)
+data$mNPS_Category<-ifelse(!is.na(data$detractor), "Detractor",
+                                   ifelse(!is.na(data$passive), "Passive",
+                                                 ifelse(!is.na(data$promotor), "Promotor", "")))
+
+```
+
+
+
+# Qs4. tf by mNPS category
+
+# Frequency list (TOP 20)
+```{r echo= FALSE}
+mNPS_words<- data %>%
+  unnest_tokens(word, mNPS_text)%>%
+  anti_join(custom_stopwords)%>%
+  count(`new_BU`,word, sort = TRUE)
+
+head(mNPS_words, n=20)
+  
+mNPS_tf<- mNPS_words %>%
+  group_by(`new_BU`) %>%
+  filter(row_number() <= 5L & `new_BU` != "NA") %>%
+  ggplot(aes(reorder_within(word, n, `new_BU`), n, fill= `new_BU`)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = "top terms", y = "term frequency",
+       title = "mNPS Comments by BU") + 
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~ `new_BU`, ncol = 2,scales = "free")
+mNPS_tf
+
+```
+
+
+# Qs4.  mNPS text by two groups
+
+```{r }
+mNPS_words<- data %>%
+  unnest_tokens(word, mNPS_text)%>%
+  anti_join(custom_stopwords)%>%
+  count(flag,word, sort = TRUE)
+
+head(mNPS_words, n=20)
+  
+mNPS_tf<- mNPS_words %>%
+  group_by(flag) %>%
+  filter(row_number() <= 5L & flag != "NA") %>%
+  ggplot(aes(reorder_within(word, n, flag), n, fill= flag)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = "top terms", y = "term frequency",
+       title = "mNPS text by two groups") + 
+  coord_flip() +
+  scale_x_reordered() +
+  facet_wrap(~ flag, ncol = 2,scales = "free")
+mNPS_tf
+
+
+data$mNPS_text[which(str_detect(data$mNPS_text,"additional")==TRUE)]
+
+
+```
+
+# Qs4. if only see negative comments(combining detractor & passive comments)
+
+
+```{r echo= FALSE}
+mNPS_words<- data %>%
+  unnest_tokens(word, mNPS_text)%>%
+  anti_join(custom_stopwords)%>%
+  count(mNPS_Category,word, sort = TRUE) %>%
+  filter(mNPS_Category=="Detractor" | mNPS_Category=="Passive")
+mNPS_words
+```
+
+# Qs4. tf-idf of negative comments
+```{r echo= FALSE}
+mNPS_words<- data %>%
+  unnest_tokens(word, mNPS_text)%>%
+  anti_join(custom_stopwords)%>%
+  count(mNPS_Category,word, sort = TRUE) %>%
+  filter(mNPS_Category=="Detractor" | mNPS_Category=="Passive")
+
+total_words <- mNPS_words %>%
+  group_by(mNPS_Category) %>%
+  summarise(total = sum(n))
+
+mNPS_words <-left_join(mNPS_words, total_words)
+
+head(mNPS_words, n = 20)
+mNPS_tf_idf <-mNPS_words %>%
+  bind_tf_idf(word, mNPS_Category, n)%>%
+  select(-total) %>%
+  arrange(desc(tf_idf)) %>%
+  slice_head(n = 10)%>%
+  mutate(word = reorder(word, tf_idf))%>%
+  ggplot(aes(word, tf_idf))+
+  geom_col(show.legend = FALSE)+
+  coord_flip()+
+  labs(x = "word", y = "tf-idf",
+       title = "Characteristic Words in Detractor & Passive Text") 
+  
+mNPS_tf_idf
+
+```
+
+
+
+# Qs4. Word Cloud of mNPS overall comments
+```{r echo= FALSE}
+text<-as.matrix(data[,16])
+text_source<-VectorSource(text)
+text_corpus <- VCorpus(text_source)
+# Apply your customized function to the tweet_corp: clean_corp
+clean_corp <- clean_corpus(text_corpus)
+
+####### Create associations
+text_dtm <- TermDocumentMatrix(clean_corp)
+#inspect(text_dtm[500:505, 500:505])
+text_dtm <- removeSparseTerms(text_dtm, 0.99)
+
+freq_words<-rowSums(as.matrix(text_dtm))
+freq_words<-sort(freq_words, decreasing = T)
+
+freqs <- data.frame(
+  term = names(freq_words),
+  num = freq_words)
+  
+wordcloud(freqs$term, freqs$num, max.words = 30, colors = brewer.pal(n = 8, name = "Dark2"))
+```
+
+
+## Topics Modeling 
+
+```{r echo=FALSE}
+
+# training & test set split
+#index<- sort(sample(nrow(data), nrow(data)*.7))
+#train<-data[index,]
+#test<-data[-index,]
+
+# model training
+#text<-as.matrix(train[,"mNPS_text"])
+data$excels[data$excels == ""] <- NA
+rawdoc<-data$excels
+rawdoc<-rawdoc[!is.na(rawdoc)]
+text<-as.matrix(rawdoc)
+text_source<-VectorSource(text)
+text_corpus <- VCorpus(text_source)
+clean_corp <- clean_corpus(text_corpus)  
+text_dtm <- DocumentTermMatrix(clean_corp)
+
+```
+
+
+```{r echo=FALSE}
+text_dtm <- removeSparseTerms(text_dtm, 0.99)
+raw.sum<-apply(text_dtm,1,FUN=sum)
+text_dtm<-text_dtm[raw.sum > 0,]
+text_lda<- LDA(text_dtm, k = 5, method="Gibbs", control=list(seed = 1234,iter = 500, verbose = 25))
+
+#text_lda<- LDA(text_dtm, k = 4, method="Gibbs", control = list(seed = 1234, burnin = 500, thin = 100, iter = 4000))
+```
+
+
+```{r warning=FALSE}
+# per-topic-per-word probabilities
+text_topics <-tidy(text_lda, matrix = "beta")
+text_top_terms <- text_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+head(text_top_terms,n = 10)
+# write.csv(text_top_terms, file = "topic term beta.csv")
+```
+
+Here are the topic mixture (distribution) that represents each comment, and the word (distribution) that are associated with each topic to help understand what that topic might be referring to.
+
+```{r include=FALSE}
+# The utmost goal of LDA is to estimate the beta : which words are important for which topic
+# and gamma: which topics are important for a particular comment.
+```
+
+
+```{r}
+text_top_terms %>%
+  mutate(term = reorder_within(term, beta,topic)) %>%
+  ggplot(aes(term,beta,fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free")+
+  coord_flip()+
+  scale_x_reordered()+
+  labs(x = NULL,y = "per-topic-per-word probabilities")
+```
+
+**COMMENTS:**
+1).provide direction to approach goals and respect people and work-life balance
+2).listen, trust, recognize people and care their success 
+3).knowledgable and good at decisions-making 
+4).open to feedback and great communication skills
+
+
+# Per-document classification:
+Each comment in this analysis represented a single topic. Thus, we may want to know which topics are associated with each document. 
+
+
+```{r}
+lda_gamma<- tidy(text_lda, matrix = "gamma")
+lda_gamma 
+
+#write.csv(lda_gamma, file = "comments with topics_full.csv")
+```
+**NOTE:** The final version of this dataset with classified topics for each comment is exported to an excel file. 
+
+
+## Additional Analysis on per-document-per-topic probability
+
+```{r}
+lda_gamma<- tidy(text_lda, matrix = "gamma")
+lda_gamma %>%
+  group_by(document) %>%
+  filter(gamma > 0.3)
+```
+
+# test a single comment
+```{r}
+
+tidy(text_dtm) %>%
+  filter(document == 3) 
+#%>% arrange(desc(count))
+
+rawdoc[3]
+```
+
+```{r warning = FALSE}
+ggplot(lda_gamma, aes(gamma)) +
+  geom_histogram(alpha = 0.8, bins = 40) +
+  scale_y_log10() +
+  labs(title = "Distribution of probabilities for all topics",
+       y = "Number of documents", x = "per-document-per-topic probability")
+```
+
+```{r warning=FALSE}
+ggplot(lda_gamma, aes(gamma, fill = as.factor(topic))) +
+  geom_histogram(alpha = 0.8, show.legend = FALSE, bins = 40) +
+  facet_wrap(~ topic, ncol = 2) +
+  scale_y_log10() +
+  labs(title = "Distribution of probability for each topic",
+       y = "Number of documents", x = "per-document-per-topic probability")
+```
+
+
+##  Sentiment Analysis
+
+Dictionary
+```{r}
+get_sentiments("bing")
+
+get_sentiments("bing") %>% 
+  count(sentiment)
+```
+
+Tidy data
+
+```{r}
+# excel column
+tidy_data <- data %>%
+  group_by(`Ref. ID`)%>%
+  mutate(linenumber = row_number())%>%
+  ungroup() %>%
+  unnest_tokens(word, excels)
+ 
+
+
+excels_sentiment <- tidy_data %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(`Ref. ID`, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment_score1 = positive - negative, sentiment_label1 = ifelse(sentiment_score1 >0, "Positive",
+                                                                          ifelse(sentiment_score1==0, "Neutral",
+                                                                                 ifelse(sentiment_score1<0, "Negative",NA))))
+
+data$sentiment_score1<- excels_sentiment$sentiment_score1[match(data$`Ref. ID`, excels_sentiment$`Ref. ID`)]
+data$sentiment_label1<- excels_sentiment$sentiment_label1[match(data$`Ref. ID`, excels_sentiment$`Ref. ID`)]
+
+
+# change column
+
+tidy_data <- data %>%
+  group_by(`Ref. ID`)%>%
+  mutate(linenumber = row_number())%>%
+  ungroup() %>%
+  unnest_tokens(word, change)
+ 
+change_sentiment <- tidy_data %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(`Ref. ID`, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment_score2 = positive - negative, sentiment_label2 = ifelse(sentiment_score2 >0, "Positive",
+                                                                          ifelse(sentiment_score2==0, "Neutral",
+                                                                                 ifelse(sentiment_score2<0, "Negative",NA))))
+
+data$sentiment_score2<- change_sentiment$sentiment_score2[match(data$`Ref. ID`, change_sentiment$`Ref. ID`)]
+data$sentiment_label2<- change_sentiment$sentiment_label2[match(data$`Ref. ID`, change_sentiment$`Ref. ID`)]
+
+
+# feedback column
+tidy_data <- data %>%
+  group_by(`Ref. ID`)%>%
+  mutate(linenumber = row_number())%>%
+  ungroup() %>%
+  unnest_tokens(word, feedback)
+ 
+feedback_sentiment <- tidy_data %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(`Ref. ID`, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment_score3 = positive - negative, sentiment_label3 = ifelse(sentiment_score3 >0, "Positive",
+                                                                          ifelse(sentiment_score3==0, "Neutral",
+                                                                                 ifelse(sentiment_score3<0, "Negative",NA))))
+
+data$sentiment_score3<- feedback_sentiment$sentiment_score3[match(data$`Ref. ID`, feedback_sentiment$`Ref. ID`)]
+data$sentiment_label3<- feedback_sentiment$sentiment_label3[match(data$`Ref. ID`, feedback_sentiment$`Ref. ID`)]
+
+
+# mnps column
+tidy_data <- data %>%
+  group_by(`Ref. ID`)%>%
+  mutate(linenumber = row_number())%>%
+  ungroup() %>%
+  unnest_tokens(word, mNPS_text)
+ 
+mnps_sentiment <- tidy_data %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(`Ref. ID`, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment_score4 = positive - negative, sentiment_label4 = ifelse(sentiment_score4 >0, "Positive",
+                                                                          ifelse(sentiment_score4 ==0, "Neutral",
+                                                                                 ifelse(sentiment_score4 <0, "Negative",NA))))
+
+data$sentiment_score4<- mnps_sentiment$sentiment_score4[match(data$`Ref. ID`, mnps_sentiment$`Ref. ID`)]
+data$sentiment_label4<- mnps_sentiment$sentiment_label4[match(data$`Ref. ID`, mnps_sentiment$`Ref. ID`)]
+
+
+
+names(data)
+View(data)
+
+write.csv(data, file = "pilot data with sentiment.csv")
+
+
+```
+
+# check single comment sentiment
+
+```{r}
+
+  
+comment1<- data %>%
+  select(`Ref. ID`, `excels`)%>%
+  filter(`Ref. ID`== 56186559)
+comment1
+ 
+```
+
+
+# sentiment summary chart
+```{r}
+
+bing_word_counts <- tidy_data %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word,n)) %>%
+  ggplot(aes(word,n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip()+
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(y = "Contribution to sentiment")
+
+
+```
+
